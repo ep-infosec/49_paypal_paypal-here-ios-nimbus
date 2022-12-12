@@ -1,0 +1,278 @@
+//
+// Copyright 2011 Jeff Verkoeyen
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+
+#import "NIChameleonObserver.h"
+
+#import "NIStylesheet.h"
+#import "NIStylesheetCache.h"
+#import "NIUserInterfaceString.h"
+#import "NimbusCore+Additions.h"
+#import "AFNetworking.h"
+
+#if !defined(__has_feature) || !__has_feature(objc_arc)
+#error "Nimbus requires ARC support."
+#endif
+
+static NSString* const kWatchFilenameKey = @"___watch___";
+static const NSTimeInterval kTimeoutInterval = 1000;
+static const NSTimeInterval kRetryInterval = 10000;
+static const NSInteger kMaxNumberOfRetries = 3;
+
+NSString* const NIGenericResourceDidChangeNotification = @"NIGenericResourceDidChangeNotification";
+NSString* const NIGenericResourceDidChangeFilePathKey = @"NIGenericResourcePathKey";
+NSString* const NIGenericResourceDidChangeNameKey = @"NIGenericResourceNameKey";
+
+@interface NIChameleonObserver() <
+    NSNetServiceBrowserDelegate,
+    NSNetServiceDelegate
+>
+- (NSString *)pathFromPath:(NSString *)path;
+@property (nonatomic,strong) NSNetServiceBrowser *netBrowser;
+@property (nonatomic,strong) NSNetService *netService;
+@end
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////
+@implementation NIChameleonObserver
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+- (void)dealloc {
+  [_queue cancelAllOperations];
+}
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+- (id)initWithStylesheetCache:(NIStylesheetCache *)stylesheetCache host:(NSString *)host {
+  if ((self = [super init])) {
+    // You must provide a stylesheet cache.
+    NIDASSERT(nil != stylesheetCache);
+    _stylesheetCache = stylesheetCache;
+    _stylesheetPaths = [[NSMutableArray alloc] init];
+    _queue = [[NSOperationQueue alloc] init];
+
+    if ([host hasSuffix:@"/"]) {
+      _host = [host copy];
+
+    } else if (host) {
+      _host = [[host stringByAppendingString:@"/"] copy];
+    }
+
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSDirectoryEnumerator* de = [fm enumeratorAtPath:_stylesheetCache.pathPrefix];
+
+    NSString* filename;
+    while ((filename = [de nextObject])) {
+      BOOL isFolder = NO;
+      NSString* path = [_stylesheetCache.pathPrefix stringByAppendingPathComponent:filename];
+      if ([fm fileExistsAtPath:path isDirectory:&isFolder]
+          && !isFolder
+          && [[filename pathExtension] isEqualToString:@"css"]) {
+        [_stylesheetPaths addObject:filename];
+        NSString* cachePath = NIPathForDocumentsResource([self pathFromPath:filename]);
+        NSError* error = nil;
+        [fm removeItemAtPath:cachePath error:&error];
+        error = nil;
+        [fm copyItemAtPath:path toPath:cachePath error:&error];
+        NIDASSERT(nil == error);
+      }
+    }
+  }
+  return self;
+}
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+- (void)downloadStylesheetWithFilename:(NSString *)path {
+  NSURL* url = [NSURL URLWithString:[_host stringByAppendingString:path]];
+  AFHTTPSessionManager *manager = [AFHTTPSessionManager manager];
+
+    [manager GET:url.absoluteString parameters:nil progress:nil success:^(NSURLSessionDataTask * _Nonnull operation, id  _Nullable responseObject) {
+        NSMutableArray* changedStylesheets = [NSMutableArray array];
+        NSArray* pathParts = [[operation.response.URL absoluteString] pathComponents];
+        NSString* resultPath = [[pathParts subarrayWithRange:NSMakeRange(2, [pathParts count] - 2)]
+                                componentsJoinedByString:@"/"];
+        NSString* rootPath = NIPathForDocumentsResource(nil);
+        NSString* hashedPath = [self pathFromPath:resultPath];
+        NSString* diskPath = [rootPath stringByAppendingPathComponent:hashedPath];
+        [responseObject writeToFile:diskPath atomically:YES];
+        
+        NIStylesheet* stylesheet = [_stylesheetCache stylesheetWithPath:resultPath loadFromDisk:NO];
+        if ([stylesheet loadFromPath:resultPath pathPrefix:rootPath delegate:self]) {
+          [changedStylesheets addObject:stylesheet];
+        }
+        
+        for (NSString* iteratingPath in _stylesheetPaths) {
+          stylesheet = [_stylesheetCache stylesheetWithPath:iteratingPath loadFromDisk:NO];
+          if ([stylesheet.dependencies containsObject:resultPath]) {
+            // This stylesheet has the changed stylesheet as a dependency so let's refresh it.
+            if ([stylesheet loadFromPath:iteratingPath pathPrefix:rootPath delegate:self]) {
+              [changedStylesheets addObject:stylesheet];
+            }
+          }
+        }
+
+        NSNotificationCenter* nc = [NSNotificationCenter defaultCenter];
+        for (NIStylesheet* changedStylesheet in changedStylesheets) {
+          [nc postNotificationName:NIStylesheetDidChangeNotification
+                            object:changedStylesheet
+                          userInfo:nil];
+        }
+
+    } failure:^(NSURLSessionDataTask * _Nullable task, NSError * _Nonnull error) {
+      NIDWARNING(@"Chameleon Observer Error: %@", error);
+  }];
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+- (void)downloadStringsWithFilename:(NSString *)path {
+  NSURL* url = [NSURL URLWithString:[_host stringByAppendingString:path]];
+  
+  AFHTTPSessionManager *manager = [AFHTTPSessionManager manager];
+  
+    [manager GET:url.absoluteString parameters:nil progress:nil success:^(NSURLSessionDataTask * _Nonnull operation, id  _Nullable responseObject) {
+    NSArray* pathParts = [[operation.response.URL absoluteString] pathComponents];
+    NSString* resultPath = [[pathParts subarrayWithRange:NSMakeRange(2, [pathParts count] - 2)]
+                            componentsJoinedByString:@"/"];
+    NSString* rootPath = NIPathForDocumentsResource(nil);
+    NSString* hashedPath = [self pathFromPath:resultPath];
+    NSString* diskPath = [rootPath stringByAppendingPathComponent:hashedPath];
+    [responseObject writeToFile:diskPath atomically:YES];
+    
+    NSNotificationCenter* nc = [NSNotificationCenter defaultCenter];
+    [nc postNotificationName:NIStringsDidChangeNotification object:nil userInfo:@{
+        NIStringsDidChangeFilePathKey: diskPath
+     }];
+    } failure:^(NSURLSessionDataTask * _Nullable task, NSError * _Nonnull error) {
+  }];
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+- (void)downloadGenericResourceWithFilename:(NSString *)path {
+    NSURL* url = [NSURL URLWithString:[_host stringByAppendingString:path]];    
+    AFHTTPSessionManager *manager = [AFHTTPSessionManager manager];
+    
+    [manager GET:url.absoluteString parameters:nil progress:nil success:^(NSURLSessionDataTask * _Nonnull operation, id  _Nullable responseObject) {
+        NSArray* pathParts = [[operation.response.URL absoluteString] pathComponents];
+        NSString* resultPath = [[pathParts subarrayWithRange:NSMakeRange(2, [pathParts count] - 2)]
+                                componentsJoinedByString:@"/"];
+        NSString* rootPath = NIPathForDocumentsResource(nil);
+        NSString* hashedPath = [self pathFromPath:resultPath];
+        NSString* diskPath = [rootPath stringByAppendingPathComponent:hashedPath];
+        [responseObject writeToFile:diskPath atomically:YES];
+        
+        NSNotificationCenter* nc = [NSNotificationCenter defaultCenter];
+        [nc postNotificationName:NIGenericResourceDidChangeNotification object:nil userInfo:@{
+            NIGenericResourceDidChangeFilePathKey: diskPath,
+            NIGenericResourceDidChangeNameKey: path
+         }];
+    } failure:^(NSURLSessionDataTask * _Nullable task, NSError * _Nonnull error) {
+    }];
+}
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+- (NSString *)pathFromPath:(NSString *)path {
+  return [path md5Hash];
+}
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////
+#pragma mark - NICSSParserDelegate
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+- (NSString *)cssParser:(NICSSParser *)parser pathFromPath:(NSString *)path {
+  return [self pathFromPath:path];
+}
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////
+#pragma mark - Public Methods
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+- (NIStylesheet *)stylesheetForPath:(NSString *)path {
+  return [_stylesheetCache stylesheetWithPath:path];
+}
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+- (void)watchSkinChanges {
+  NSURL* url = [NSURL URLWithString:[_host stringByAppendingString:@"watch"]];
+  NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL:url];
+  request.timeoutInterval = kTimeoutInterval;
+  AFHTTPSessionManager *manager = [AFHTTPSessionManager manager];
+
+  [manager GET:url.absoluteString parameters:nil progress:nil success:^(NSURLSessionDataTask * _Nonnull task, id  _Nullable responseObject) {
+    NSString* stringData = [[NSString alloc] initWithData:responseObject
+                                                 encoding:NSUTF8StringEncoding];
+
+    NSArray* files = [stringData componentsSeparatedByString:@"\n"];
+    for (NSString* filename in files) {
+      if ([[filename lowercaseString] hasSuffix:@".strings"]) {
+        [self downloadStringsWithFilename: filename];
+      } else if ([[filename lowercaseString] hasSuffix:@".css"]) {
+        [self downloadStylesheetWithFilename:filename];
+      } else {
+        [self downloadGenericResourceWithFilename:filename];
+      }
+    }
+
+    // Immediately start watching for more skin changes.
+    _retryCount = 0;
+    [self watchSkinChanges];
+
+    } failure:^(NSURLSessionDataTask * _Nullable task, NSError * _Nonnull error) {
+    if (_retryCount < kMaxNumberOfRetries) {
+      ++_retryCount;
+      
+      dispatch_time_t popTime = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kRetryInterval * NSEC_PER_MSEC));
+      dispatch_after(popTime, dispatch_get_main_queue(), ^(void){
+        [self watchSkinChanges];
+      });
+    }
+  }];
+}
+
+-(void)enableBonjourDiscovery:(NSString *)serviceName
+{
+    self.netBrowser = [[NSNetServiceBrowser alloc] init];
+    self.netBrowser.delegate = self;
+    [self.netBrowser searchForServicesOfType:[NSString stringWithFormat:@"_%@._tcp", serviceName] inDomain:@""];
+}
+
+-(void)netServiceBrowser:(NSNetServiceBrowser *)aNetServiceBrowser didFindService:(NSNetService *)aNetService moreComing:(BOOL)moreComing
+{
+    [self.netBrowser stop];
+    self.netBrowser = nil;
+
+    self.netService = aNetService;
+    aNetService.delegate = self;
+    [aNetService resolveWithTimeout:15.0];
+}
+
+-(void)netServiceDidResolveAddress:(NSNetService *)sender
+{
+    _host = [NSString stringWithFormat:@"http://%@:%d/", [sender hostName], (int)[sender port]];
+    self.netService = nil;
+    [self watchSkinChanges];
+}
+
+@end

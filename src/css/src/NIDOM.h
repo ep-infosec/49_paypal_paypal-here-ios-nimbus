@@ -1,0 +1,242 @@
+//
+// Copyright 2011 Jeff Verkoeyen
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+
+#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
+
+@class NIStylesheet;
+@protocol NIDOMResourceResolverDelegate;
+
+/**
+ * A leight-weight DOM-like object to which you attach views and stylesheets.
+ *
+ *      @ingroup NimbusCSS
+ *
+ * To be clear: this is not an HTML DOM, but its intent is the same. NIDOM is designed
+ * to simplify the view <=> stylesheet relationship. Add a view to the DOM and it will
+ * automatically apply any applicable styles from the attached stylesheet. If the stylesheet
+ * changes you can refresh the DOM and all registered views will be updated accordingly.
+ *
+ * Because NimbusCSS supports positioning and sizing using percentages and relative units,
+ * the order of view registration is important. Generally, you should register superviews
+ * first, so that any size calculations on their children can occur after their own
+ * size has been determined. It's not feasible (or at least advisable) to try and
+ * untangle these dependencies automatically.
+ *
+ * <h2>Example Use</h2>
+ *
+ * NIDOM is most useful when you create a single NIDOM per view controller.
+ *
+@code
+NIStylesheet* stylesheet = [stylesheetCache stylesheetWithPath:@"root/root.css"];
+// Create a NIDOM object in your view controller.
+_dom = [[NIDOM alloc] initWithStylesheet:stylesheet];
+@endcode
+ *
+ * You then register views in the DOM during loadView or viewDidLoad.
+ *
+@code
+// Registers a view by itself such that only "UILabel" rulesets will apply.
+[_dom registerView:_label];
+
+// Register a view with a specific CSS class. Any rulesets with the ".background" scope will
+// apply to this view.
+[_dom registerView:self.view withCSSClass:@"background"];
+@endcode
+ *
+ * Once the view controller unloads its view you must unregister all of the views from your DOM.
+ *
+@code
+- (void)viewDidUnload {
+  [_dom unregisterAllViews];
+}
+@endcode
+ */
+@interface NIDOM : NSObject
+
+// Designated initializer.
+
+- (id)initWithStylesheets:(NSArray *)stylesheets;
+
+
++ (id)domWithStylesheet:(NIStylesheet *)stylesheet;
++ (id)domWithStylesheets:(NSArray *)stylesheets;
+
+- (NSString *)infoForView:(UIView *)view;
+
+- (void)registerView:(UIView *)view;
+- (void)registerView:(UIView *)view withCSSClass:(NSString *)cssClass;
+- (void)registerView:(UIView *)view withCSSClass:(NSString *)cssClass andId: (NSString*) viewId;
+
+- (void)addCssClass:(NSString *)cssClass toView:(UIView*) view;
+- (void)addCssClasses:(NSArray *)cssClasses toView:(UIView *)view;
+- (void)removeCssClass: (NSString*) cssClass fromView: (UIView*) view;
+- (BOOL)view: (UIView*) view hasShortSelector: (NSString*) shortSelector;
+
+- (void)unregisterView:(UIView *)view;
+- (void)unregisterAllViews;
+
+- (void)refresh;
+- (void)refreshView: (UIView*) view;
+- (void)ensureViewHasBeenRefreshed: (UIView*) view;
+- (BOOL)isRefreshing;
+
+-(UIView*)viewById: (NSString*) viewId;
+
+@property (nonatomic,unsafe_unretained) id target;
+@end
+
+/** @name Creating NIDOMs */
+
+/**
+ * Initializes a newly allocated DOM with the given stylesheet.
+ *
+ *      @fn NIDOM::initWithStylesheet:
+ */
+
+/**
+ * Returns an autoreleased DOM initialized with the given stylesheet.
+ *
+ *      @fn NIDOM::domWithStylesheet:
+ */
+
+/** @name Registering Views */
+
+/**
+ * Registers the given view with the DOM.
+ *
+ * The view's class will be used as the CSS selector when applying styles from the stylesheet.
+ *
+ *      @fn NIDOM::registerView:
+ */
+
+/**
+ * Registers the given view with the DOM.
+ *
+ * The view's class as well as the given CSS class string will be used as the CSS selectors
+ * when applying styles from the stylesheet.
+ *
+ *      @fn NIDOM::registerView:withCSSClass:
+ */
+
+/**
+ * Removes the given view from from the DOM.
+ *
+ * Once a view has been removed from the DOM it will not be restyled when the DOM is refreshed.
+ *
+ *      @fn NIDOM::unregisterView:
+ */
+
+/**
+ * Removes all views from from the DOM.
+ *
+ *      @fn NIDOM::unregisterAllViews
+ */
+
+
+/** @name Re-Applying All Styles */
+
+/**
+ * Reapplies the stylesheet to all views. Since there may be positioning involved,
+ * you may need to reapply if layout or sizes change. Please note that refresh
+ * and refreshView will track which views have been refreshed so that we can
+ * be as "purposeful" as possible about the order in which styles are applied.
+ * In cases where your style references another component (either when using percentage
+ * units for certain styles or with relative positioning), you should call
+ * ensureViewHasBeenRefreshed on the view your computations are based on. The DOM
+ * will maintain a set of views that have been refreshed during a "refresh" or "refreshView"
+ * run and clear said list when EITHER a new refresh/refreshView is run or refresh ends.
+ * This means you should not call refresh or refreshView in your application of styles
+ * to your view, because you could end up in an infinite loop. Generally you don't need
+ * to worry about this because all the (UIView based)+NIStyleable categories do the right
+ * thing.
+ *
+ *      @fn NIDOM::refresh
+ */
+
+/**
+ * Reapplies the stylesheet to a single view. Since there may be positioning involved,
+ * you may need to reapply if layout or sizes change. Please note that refresh
+ * and refreshView will track which views have been refreshed so that we can
+ * be as "purposeful" as possible about the order in which styles are applied.
+ * In cases where your style references another component (either when using percentage
+ * units for certain styles or with relative positioning), you should call
+ * ensureViewHasBeenRefreshed on the view your computations are based on. The DOM
+ * will maintain a set of views that have been refreshed during a "refresh" or "refreshView"
+ * run and clear said list when EITHER a new refresh/refreshView is run or refresh ends.
+ * This means you should not call refresh or refreshView in your application of styles
+ * to your view, because you could end up in an infinite loop. Generally you don't need
+ * to worry about this because all the (UIView based)+NIStyleable categories do the right
+ * thing.
+ *
+ *      @fn NIDOM::refreshView:
+ */
+
+/**
+ * Ensure that, in the current refresh/refreshView cycle, a view has had styles applied to it.
+ * If not, refresh the styles on the view without clearing the refresh/refreshView state
+ * management.
+ *
+ *      @fn NIDOM::ensureViewHasBeenRefreshed
+ */
+
+/**
+ * Returns YES if in the middle of a refresh
+ *
+ *      @fn NIDOM::isRefreshing:
+ */
+
+/**
+ * Removes the association of a view with a CSS class. Note that this doesn't
+ * "undo" the styles that the CSS class generated, it just stops applying them
+ * in the future.
+ *
+ *      @fn NIDOM::removeCssClass:fromView:
+ */
+
+/**
+ * Create an association of a view with a CSS class and apply relevant styles
+ * immediately.
+ *
+ *      @fn NIDOM::addCssClass:toView:
+ */
+
+/**
+ * Create an association of a view with an array of CSS classes and apply
+ * relevant styles immediately.
+ *
+ *      @fn NIDOM::addCssClasses:toView:
+ */
+
+/**
+ * Returns YES if the view has been registered with a specified CSS class
+ *
+ *      @fn NIDOM::view:hasCssClass:
+ */
+
+/** @name Dynamic View Construction */
+
+/**
+ * Using the [UIView buildSubviews:inDOM:] extension allows you to build view
+ * hierarchies from JSON (or anything able to convert to NSDictionary/NSArray
+ * of simple types) documents, mostly for prototyping. Those documents can
+ * specify selectors, and those selectors need a target. This target property
+ * will be the target for all selectors in a given DOM. Truth is it only matters
+ * during buildSubviews, so in theory you could set and reset it across multiple
+ * build calls if you wanted to.
+ *
+ *      @fn NIDOM::target
+ */
